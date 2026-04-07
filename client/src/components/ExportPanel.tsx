@@ -4,16 +4,29 @@ import { apiRequest } from '@/lib/queryClient';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import type { Event, Attendee, Table, SeatAssignment, MealConfig } from '@shared/schema';
-import { Download, FileText, Presentation } from 'lucide-react';
+import { Download, FileText, Loader2, Presentation } from 'lucide-react';
 
 interface Props {
   event: Event;
-  tables: Table[];         // tables for the currently-active meal (used for summary stats)
+  tables: Table[];          // tables for the currently-active meal (summary stats)
   attendees: Attendee[];
   allAssignments: SeatAssignment[];
   mealFunctionNames: string[];
+  activeMeal: number;
 }
 
+// ── CSV helpers ────────────────────────────────────────────────────────────
+/** Properly escape a value for RFC-4180 CSV (quote if needed, double internal quotes). */
+function csvCell(val: string | number | null | undefined): string {
+  if (val === null || val === undefined) return '';
+  const s = String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+// ── PPTX seat-position helpers ─────────────────────────────────────────────
 function getSeatPositionsCircular(cx: number, cy: number, radius: number, count: number, shape: 'full' | 'half') {
   const positions = [];
   if (shape === 'full') {
@@ -56,16 +69,14 @@ function getSquareSeatPositions(cx: number, cy: number, size: number, count: num
   return positions;
 }
 
-export default function ExportPanel({ event, tables, attendees, allAssignments, mealFunctionNames }: Props) {
+export default function ExportPanel({ event, tables, attendees, allAssignments, mealFunctionNames, activeMeal }: Props) {
   const { toast } = useToast();
   const [exporting, setExporting] = useState(false);
 
   const attendeeMap = new Map<number, Attendee>();
   for (const a of attendees) attendeeMap.set(a.id, a);
 
-  // Fetch per-meal tables and configs for all meal functions (needed for accurate export)
-  // useQueries is the correct way to handle a dynamic number of queries without
-  // violating React's Rules of Hooks (hooks must not be called inside loops).
+  // Fetch per-meal tables and configs for all meal functions
   const mealTableResults = useQueries({
     queries: mealFunctionNames.map((_, i) => ({
       queryKey: ['/api/events', event.id, 'tables', i] as const,
@@ -82,47 +93,61 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
   const allMealTables: Table[][] = mealTableResults.map(q => (q.data as Table[] | undefined) ?? []);
   const allMealConfigs: (MealConfig | undefined)[] = mealConfigResults.map(q => q.data as MealConfig | undefined);
 
+  // Disable exports while data is still loading
+  const dataLoading = mealTableResults.some(q => q.isLoading) || mealConfigResults.some(q => q.isLoading);
+
+  // ── CSV export ─────────────────────────────────────────────────────────────
   const exportCSV = () => {
-    const rows: string[] = ['Meal Function,Table Number,Table Shape,Seat Position,Name,Role,Company'];
+    // UTF-8 BOM so Excel auto-detects encoding (prevents garbled non-ASCII names)
+    const BOM = '\uFEFF';
+    const header = ['Meal Function', 'Table Number', 'Table Shape', 'Seat Position', 'Name', 'Role', 'Company']
+      .map(csvCell).join(',');
+    const rows: string[] = [BOM + header];
+
     for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
       const mealTables = allMealTables[mealIdx] ?? [];
       const mealConfig = allMealConfigs[mealIdx];
       const spt = mealConfig?.seatsPerTable ?? 10;
       const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
+
       for (const table of [...mealTables].sort((a, b) => a.tableNumber - b.tableNumber)) {
-        const tableAssignments = mealAssignments.filter(a => a.tableId === table.id)
+        const tableAssignments = mealAssignments
+          .filter(a => a.tableId === table.id)
           .sort((a, b) => a.seatPosition - b.seatPosition);
+
         for (let seat = 0; seat < spt; seat++) {
           const a = tableAssignments.find(x => x.seatPosition === seat);
           const person = a ? attendeeMap.get(a.attendeeId) : null;
           rows.push([
-            `"${mealName}"`,
-            table.tableNumber,
-            table.shape,
-            seat + 1,
-            person ? `"${person.name}"` : '',
-            person ? person.role : '',
-            person?.company ? `"${person.company}"` : '',
+            csvCell(mealName),
+            csvCell(table.tableNumber),
+            csvCell(table.shape),
+            csvCell(seat + 1),
+            csvCell(person?.name),
+            csvCell(person?.role),
+            csvCell(person?.company),
           ].join(','));
         }
       }
     }
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+
+    const blob = new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${event.name.replace(/\s+/g, '_')}_seating.csv`;
-    a.click();
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${event.name.replace(/\s+/g, '_')}_seating.csv`;
+    link.click();
     URL.revokeObjectURL(url);
     toast({ title: 'CSV exported' });
   };
 
+  // ── PPTX export ────────────────────────────────────────────────────────────
   const exportPPTX = async () => {
     setExporting(true);
     try {
       const PptxGenJS = (await import('pptxgenjs')).default;
       const pptx = new PptxGenJS();
-      pptx.layout = 'LAYOUT_WIDE'; // 13.33" x 7.5"
+      pptx.layout = 'LAYOUT_WIDE'; // 13.33" × 7.5"
 
       const SLIDE_W = 13.33;
       const SLIDE_H = 7.5;
@@ -133,6 +158,7 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
       const scaleX = (SLIDE_W - 1) / canvasW;
       const scaleY = (SLIDE_H - 1) / canvasH;
 
+      // Interleave: floor-plan slide + seating-list slide for EACH meal in order
       for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
         const mealTables = allMealTables[mealIdx] ?? [];
         const mealConfig = allMealConfigs[mealIdx];
@@ -149,10 +175,10 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
 
         const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
 
-        // ── Floor plan slide ──
-        const slide = pptx.addSlide();
-        slide.background = { color: 'F0F4FF' };
-        slide.addText(`${event.name} — ${mealName}`, {
+        // ── Slide 1 of 2: Floor plan ──────────────────────────────────────
+        const floorSlide = pptx.addSlide();
+        floorSlide.background = { color: 'F0F4FF' };
+        floorSlide.addText(`${event.name} — ${mealName}`, {
           x: 0.3, y: 0.1, w: SLIDE_W - 0.6, h: 0.45,
           fontSize: 20, bold: true, color: '1e293b', fontFace: 'Calibri',
         });
@@ -162,49 +188,41 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
         const sy = 0.7 + stagePos.y * scaleY;
         const sw = stagePos.w * scaleX;
         const sh = stagePos.h * scaleY;
-        slide.addShape(pptx.ShapeType.rect, {
+        floorSlide.addShape(pptx.ShapeType.rect, {
           x: sx, y: sy, w: sw, h: sh,
           fill: { color: '1e293b' }, line: { color: '475569', width: 1 },
         });
-        slide.addText('STAGE', {
+        floorSlide.addText('STAGE', {
           x: sx, y: sy, w: sw, h: sh,
           fontSize: 10, bold: true, color: 'FFFFFF',
           align: 'center', valign: 'middle', fontFace: 'Calibri',
         });
 
         for (const table of mealTables) {
-          const tx = table.x;
-          const ty = table.y;
-          const cx = tx + (isCircular ? TABLE_RADIUS + 30 : TABLE_SIZE / 2 + 20);
-          const cy = ty + (isCircular ? TABLE_RADIUS + 30 : TABLE_SIZE / 2 + 20);
-
+          const cx = table.x + (isCircular ? TABLE_RADIUS + 30 : TABLE_SIZE / 2 + 20);
+          const cy = table.y + (isCircular ? TABLE_RADIUS + 30 : TABLE_SIZE / 2 + 20);
           const slideX = 0.5 + cx * scaleX;
           const slideY = 0.7 + cy * scaleY;
           const tableR = TABLE_RADIUS * scaleX;
           const tableRY = TABLE_RADIUS * scaleY;
 
           if (isCircular) {
-            if (table.shape === 'full') {
-              slide.addShape(pptx.ShapeType.ellipse, {
-                x: slideX - tableR, y: slideY - tableRY, w: tableR * 2, h: tableRY * 2,
-                fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
-              });
-            } else {
-              slide.addShape(pptx.ShapeType.ellipse, {
-                x: slideX - tableR, y: slideY - tableRY, w: tableR * 2, h: tableRY,
-                fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
-              });
-            }
+            floorSlide.addShape(pptx.ShapeType.ellipse, {
+              x: slideX - tableR,
+              y: table.shape === 'full' ? slideY - tableRY : slideY - tableRY,
+              w: tableR * 2,
+              h: table.shape === 'full' ? tableRY * 2 : tableRY,
+              fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
+            });
           } else {
             const sqHalf = (TABLE_SIZE / 2) * scaleX;
-            slide.addShape(pptx.ShapeType.rect, {
+            floorSlide.addShape(pptx.ShapeType.rect, {
               x: slideX - sqHalf, y: slideY - sqHalf, w: sqHalf * 2, h: sqHalf * 2,
               fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
-              rectRadius: 0.05,
             });
           }
 
-          slide.addText(`${table.tableNumber}`, {
+          floorSlide.addText(`${table.tableNumber}`, {
             x: slideX - 0.12, y: slideY - 0.1, w: 0.24, h: 0.2,
             fontSize: 8, bold: true, color: '1e40af', align: 'center', fontFace: 'Calibri',
           });
@@ -222,17 +240,17 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             const seatY = 0.7 + pos.y * scaleY;
             const seatR = 0.14;
 
-            slide.addShape(pptx.ShapeType.ellipse, {
+            floorSlide.addShape(pptx.ShapeType.ellipse, {
               x: seatX - seatR, y: seatY - seatR, w: seatR * 2, h: seatR * 2,
               fill: { color }, line: { color: 'FFFFFF', width: 1 },
             });
 
             if (person) {
               const inits = person.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
-              slide.addText(inits, {
+              floorSlide.addText(inits, {
                 x: seatX - seatR, y: seatY - seatR, w: seatR * 2, h: seatR * 2,
-                fontSize: 5, bold: true, color: 'FFFFFF', align: 'center', valign: 'middle',
-                fontFace: 'Calibri',
+                fontSize: 5, bold: true, color: 'FFFFFF',
+                align: 'center', valign: 'middle', fontFace: 'Calibri',
               });
             }
           }
@@ -246,28 +264,21 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
           { label: 'Invitee', color: '3b82f6' },
           { label: 'Empty', color: 'CBD5E1' },
         ]) {
-          slide.addShape(pptx.ShapeType.ellipse, {
+          floorSlide.addShape(pptx.ShapeType.ellipse, {
             x: lx, y: SLIDE_H - 0.45, w: 0.12, h: 0.12,
             fill: { color: item.color }, line: { color: 'FFFFFF', width: 1 },
           });
-          slide.addText(item.label, {
+          floorSlide.addText(item.label, {
             x: lx + 0.16, y: SLIDE_H - 0.48, w: 0.7, h: 0.18,
             fontSize: 8, color: '475569', fontFace: 'Calibri',
           });
           lx += 0.9;
         }
-      }
 
-      // ── Seating list summary slides (one per meal) ──
-      for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
-        const mealTables = allMealTables[mealIdx] ?? [];
-        const mealConfig = allMealConfigs[mealIdx];
-        const spt = mealConfig?.seatsPerTable ?? 10;
-        const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
-
-        const slide = pptx.addSlide();
-        slide.background = { color: 'FFFFFF' };
-        slide.addText(`${mealName} — Seating List`, {
+        // ── Slide 2 of 2: Seating list ────────────────────────────────────
+        const listSlide = pptx.addSlide();
+        listSlide.background = { color: 'FFFFFF' };
+        listSlide.addText(`${mealName} — Seating List`, {
           x: 0.4, y: 0.15, w: SLIDE_W - 0.8, h: 0.45,
           fontSize: 20, bold: true, color: '1e293b', fontFace: 'Calibri',
         });
@@ -283,17 +294,19 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
           const bx = 0.4 + col * colW;
           let by = startY + row * (rowH * (spt + 2));
 
-          slide.addShape(pptx.ShapeType.rect, {
+          // Header row
+          listSlide.addShape(pptx.ShapeType.rect, {
             x: bx, y: by, w: colW - 0.1, h: rowH,
             fill: { color: '1e40af' }, line: { color: '1e40af', width: 0 },
           });
-          slide.addText(`Table ${table.tableNumber} (${table.shape})`, {
+          listSlide.addText(`Table ${table.tableNumber} (${table.shape})`, {
             x: bx, y: by, w: colW - 0.1, h: rowH,
             fontSize: 7, bold: true, color: 'FFFFFF', align: 'center', fontFace: 'Calibri',
           });
           by += rowH;
 
-          const tableAssignments = mealAssignments.filter(a => a.tableId === table.id)
+          const tableAssignments = mealAssignments
+            .filter(a => a.tableId === table.id)
             .sort((a, b) => a.seatPosition - b.seatPosition);
 
           const roleColorMap: Record<string, string> = { host: '9333ea', floater: 'ea8033', invitee: '3b82f6' };
@@ -302,15 +315,15 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             const person = a ? attendeeMap.get(a.attendeeId) : null;
             const dotColor = person ? (roleColorMap[person.role] ?? '3b82f6') : 'CBD5E1';
 
-            slide.addShape(pptx.ShapeType.rect, {
+            listSlide.addShape(pptx.ShapeType.rect, {
               x: bx, y: by, w: colW - 0.1, h: rowH,
               fill: { color: s % 2 === 0 ? 'F8FAFC' : 'FFFFFF' }, line: { color: 'E2E8F0', width: 0.5 },
             });
-            slide.addShape(pptx.ShapeType.ellipse, {
+            listSlide.addShape(pptx.ShapeType.ellipse, {
               x: bx + 0.03, y: by + 0.025, w: 0.09, h: 0.09,
               fill: { color: dotColor }, line: { color: 'FFFFFF', width: 0.5 },
             });
-            slide.addText(`S${s + 1} ${person ? person.name : '—'}`, {
+            listSlide.addText(`S${s + 1}  ${person ? person.name : '—'}`, {
               x: bx + 0.14, y: by, w: colW - 0.25, h: rowH,
               fontSize: 6, color: person ? '1e293b' : '94a3b8',
               fontFace: 'Calibri', valign: 'middle',
@@ -330,20 +343,27 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
     }
   };
 
-  // Summary stats for active meal (meal 0 by default in this panel)
-  const totalSeats = tables.length * (allMealConfigs[0]?.seatsPerTable ?? 10);
-  const assigned0 = allAssignments.filter(a => a.mealFunctionIndex === 0).length;
+  // ── Summary stats for the active meal ─────────────────────────────────────
+  const activeMealConfig = allMealConfigs[activeMeal];
+  const seatsPerTable = activeMealConfig?.seatsPerTable ?? 10;
+  const totalSeats = tables.length * seatsPerTable;
+  const assignedInMeal = allAssignments.filter(a => a.mealFunctionIndex === activeMeal).length;
+
+  const isExportDisabled = dataLoading || exporting;
 
   return (
     <div className="space-y-4">
+      {/* Summary */}
       <div>
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Summary</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+          Summary — {mealFunctionNames[activeMeal]}
+        </h3>
         <div className="grid grid-cols-2 gap-2">
           {[
             { label: 'Tables', value: tables.length },
             { label: 'Total Seats', value: totalSeats },
             { label: 'Attendees', value: attendees.length },
-            { label: 'Assigned', value: assigned0 },
+            { label: 'Assigned', value: assignedInMeal },
           ].map(stat => (
             <div key={stat.label} className="bg-muted/50 rounded p-2 text-center">
               <p className="text-lg font-bold">{stat.value}</p>
@@ -353,29 +373,46 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
         </div>
       </div>
 
+      {/* Export buttons */}
       <div>
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Export</h3>
+        {dataLoading && (
+          <p className="text-[10px] text-muted-foreground flex items-center gap-1 mb-2">
+            <Loader2 className="w-3 h-3 animate-spin" /> Loading meal data…
+          </p>
+        )}
         <div className="space-y-2">
-          <Button className="w-full h-9 justify-start gap-2 text-xs" variant="outline"
-            onClick={exportCSV} data-testid="button-export-csv">
+          <Button
+            className="w-full h-9 justify-start gap-2 text-xs" variant="outline"
+            onClick={exportCSV}
+            disabled={isExportDisabled}
+            data-testid="button-export-csv"
+          >
             <FileText className="w-4 h-4" />
             <div className="text-left">
               <div className="font-medium">Export as CSV</div>
-              <div className="text-[10px] text-muted-foreground">All meal functions, table + seat assignments</div>
+              <div className="text-[10px] text-muted-foreground">All meal functions · UTF-8, Excel-compatible</div>
             </div>
           </Button>
 
-          <Button className="w-full h-9 justify-start gap-2 text-xs" variant="outline"
-            onClick={exportPPTX} disabled={exporting} data-testid="button-export-pptx">
-            <Presentation className="w-4 h-4" />
+          <Button
+            className="w-full h-9 justify-start gap-2 text-xs" variant="outline"
+            onClick={exportPPTX}
+            disabled={isExportDisabled}
+            data-testid="button-export-pptx"
+          >
+            {exporting
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <Presentation className="w-4 h-4" />}
             <div className="text-left">
-              <div className="font-medium">{exporting ? 'Generating...' : 'Export as PPTX'}</div>
-              <div className="text-[10px] text-muted-foreground">One floor plan + seating list per meal function</div>
+              <div className="font-medium">{exporting ? 'Generating…' : 'Export as PPTX'}</div>
+              <div className="text-[10px] text-muted-foreground">Floor plan + seating list per meal function</div>
             </div>
           </Button>
         </div>
       </div>
 
+      {/* Role guide */}
       <div>
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Role Guide</h3>
         <div className="space-y-1.5">

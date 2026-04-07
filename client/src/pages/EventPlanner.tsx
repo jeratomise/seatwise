@@ -181,6 +181,7 @@ export default function EventPlanner() {
                 attendees={attendees}
                 allAssignments={allAssignments}
                 mealFunctionNames={mealFunctionNames}
+                activeMeal={activeMeal}
               />
             </TabsContent>
           </Tabs>
