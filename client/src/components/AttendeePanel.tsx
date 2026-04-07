@@ -5,12 +5,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import type { Attendee, Table, SeatAssignment, MealConfig } from '@shared/schema';
+import type { Attendee, Event, Table, SeatAssignment, MealConfig } from '@shared/schema';
 import { Upload, Plus, Trash2, Shuffle, X, UserCheck } from 'lucide-react';
 import Papa from 'papaparse';
 
 interface Props {
   eventId: number;
+  event?: Event;
   attendees: Attendee[];
   tables: Table[];
   assignments: SeatAssignment[];
@@ -32,7 +33,7 @@ function roleBadge(role: string) {
   return m[role] ?? '';
 }
 
-export default function AttendeePanel({ eventId, attendees, tables, assignments, activeMeal, mealConfig }: Props) {
+export default function AttendeePanel({ eventId, event, attendees, tables, assignments, activeMeal, mealConfig }: Props) {
   const { toast } = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
   const [newName, setNewName] = useState('');
@@ -42,7 +43,7 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
   const [showImport, setShowImport] = useState(false);
   const [csvData, setCsvData] = useState<any[]>([]);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
-  const [colMap, setColMap] = useState({ name: '', role: '', company: '' });
+  const [colMap, setColMap] = useState({ name: '', role: '', company: '', mealFunction: '' });
 
   const createMutation = useMutation({
     mutationFn: (data: any) => apiRequest('POST', `/api/events/${eventId}/attendees`, data),
@@ -68,9 +69,10 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'attendees'] });
       setShowImport(false);
-      setCsvData([]); setCsvHeaders([]); setColMap({ name: '', role: '', company: '' });
+      setCsvData([]); setCsvHeaders([]); setColMap({ name: '', role: '', company: '', mealFunction: '' });
       toast({ title: `Imported ${Array.isArray(data) ? data.length : '?'} attendees` });
     },
+    onError: (e: any) => toast({ title: 'Import failed', description: e.message, variant: 'destructive' }),
   });
 
   // Shuffle assignments
@@ -190,7 +192,8 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
         const nameCol = fields.find(f => /full.?name|^name$/i.test(f)) ?? fields.find(f => /name/i.test(f)) ?? '';
         const roleCol = fields.find(f => /^type$/i.test(f)) ?? fields.find(f => /role|type/i.test(f)) ?? '';
         const compCol = fields.find(f => /company|org|country|region/i.test(f)) ?? '';
-        setColMap({ name: nameCol, role: roleCol, company: compCol });
+        const mealFnCol = fields.find(f => /meal.?function|meal.?plan/i.test(f)) ?? '';
+        setColMap({ name: nameCol, role: roleCol, company: compCol, mealFunction: mealFnCol });
       },
     });
     // Reset input so same file can be re-uploaded
@@ -210,8 +213,50 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
     return 'invitee';
   }
 
-  const handleImportConfirm = () => {
+  const handleImportConfirm = async () => {
     if (!colMap.name) return toast({ title: 'Select a Name column', variant: 'destructive' });
+
+    // Auto-create meal plans from Meal Function column values
+    if (colMap.mealFunction) {
+      const mealFnValues = [
+        ...new Set(
+          csvData
+            .map(row => (row[colMap.mealFunction] ?? '').toString().trim())
+            .filter(v => v !== ''),
+        ),
+      ];
+
+      if (mealFnValues.length > 0) {
+        try {
+          const currentNames: string[] = event
+            ? JSON.parse(event.mealFunctionNames)
+            : ['Meal Function 1'];
+          // Replace the default placeholder if the event only has it
+          const isDefaultOnly =
+            currentNames.length === 1 && /^meal function/i.test(currentNames[0]);
+          const base = isDefaultOnly ? [] : currentNames;
+          const merged = [...new Set([...base, ...mealFnValues])];
+
+          if (merged.join('|') !== currentNames.join('|')) {
+            await apiRequest('PATCH', `/api/events/${eventId}`, {
+              mealFunctionCount: merged.length,
+              mealFunctionNames: JSON.stringify(merged),
+            });
+            queryClient.invalidateQueries({ queryKey: ['/api/events', eventId] });
+            toast({
+              title: `Meal plans updated`,
+              description: `Created: ${merged.join(', ')}`,
+            });
+          }
+        } catch {
+          // Non-fatal: continue with attendee import
+        }
+      }
+    }
+
+    // Deduplicate by name (case-insensitive) — same person may appear on multiple
+    // meal-function rows but should be a single attendee in the list
+    const seen = new Set<string>();
     const list = csvData
       .map(row => ({
         name: (row[colMap.name] ?? '').toString().trim(),
@@ -219,7 +264,14 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
         company: colMap.company ? (row[colMap.company] ?? '').toString().trim() : '',
         notes: '',
       }))
-      .filter(r => r.name.length > 0);
+      .filter(r => r.name.length > 0)
+      .filter(r => {
+        const key = r.name.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
     if (list.length === 0) return toast({ title: 'No valid rows found', variant: 'destructive' });
     bulkImportMutation.mutate(list);
   };
@@ -344,12 +396,14 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
             <div className="p-4 space-y-3 flex-1 overflow-y-auto">
               <p className="text-xs text-muted-foreground">{csvData.length} rows detected. Map columns below:</p>
 
-              {(['name', 'role', 'company'] as const).map(field => (
+              {(['name', 'role', 'company', 'mealFunction'] as const).map(field => (
                 <div key={field} className="flex items-center gap-3">
-                  <label className="text-xs font-medium capitalize w-20 flex-shrink-0">{field}:</label>
+                  <label className="text-xs font-medium w-24 flex-shrink-0 capitalize">
+                    {field === 'mealFunction' ? 'Meal Function' : field}:
+                  </label>
                   <Select value={colMap[field]} onValueChange={v => setColMap(prev => ({ ...prev, [field]: v }))}>
                     <SelectTrigger className="h-7 text-xs flex-1">
-                      <SelectValue placeholder={`Select ${field} column`} />
+                      <SelectValue placeholder={`Select ${field === 'mealFunction' ? 'Meal Function' : field} column`} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="">— None —</SelectItem>
@@ -361,10 +415,12 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
                 </div>
               ))}
 
-              <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">
-                <p className="font-medium mb-1">Role mapping (auto-detected):</p>
+              <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded space-y-1">
+                <p className="font-medium">Role mapping (auto-detected):</p>
                 <p>Any value containing <code>host</code> → Host &nbsp;·&nbsp; containing <code>floater</code> → Floater &nbsp;·&nbsp; everything else → Invitee</p>
-                <p className="mt-1 text-[10px]">e.g. "Table Host (ANZ)", "Table Host (India)" → Host &nbsp;·&nbsp; "Floater" → Floater</p>
+                <p className="text-[10px]">e.g. "Table Host (ANZ)", "Table Host (India)" → Host &nbsp;·&nbsp; "Floater" → Floater</p>
+                <p className="font-medium pt-1">Meal Function (optional):</p>
+                <p>If mapped, unique values (e.g. Lunch, Dinner) are auto-created as separate Meal Plans. Duplicate names across meal rows are merged into one attendee.</p>
               </div>
 
               {/* Preview */}

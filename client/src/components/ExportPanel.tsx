@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQueries } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
@@ -64,24 +64,23 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
   for (const a of attendees) attendeeMap.set(a.id, a);
 
   // Fetch per-meal tables and configs for all meal functions (needed for accurate export)
-  const mealCount = mealFunctionNames.length;
-  const mealTableQueries = Array.from({ length: mealCount }, (_, i) =>
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useQuery<Table[]>({
-      queryKey: ['/api/events', event.id, 'tables', i],
-      queryFn: () => apiRequest('GET', `/api/events/${event.id}/tables?meal=${i}`),
-    })
-  );
-  const mealConfigQueries = Array.from({ length: mealCount }, (_, i) =>
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useQuery<MealConfig>({
-      queryKey: ['/api/events', event.id, 'meal-config', i],
-      queryFn: () => apiRequest('GET', `/api/events/${event.id}/meal-config?meal=${i}`),
-    })
-  );
+  // useQueries is the correct way to handle a dynamic number of queries without
+  // violating React's Rules of Hooks (hooks must not be called inside loops).
+  const mealTableResults = useQueries({
+    queries: mealFunctionNames.map((_, i) => ({
+      queryKey: ['/api/events', event.id, 'tables', i] as const,
+      queryFn: (): Promise<Table[]> => apiRequest('GET', `/api/events/${event.id}/tables?meal=${i}`),
+    })),
+  });
+  const mealConfigResults = useQueries({
+    queries: mealFunctionNames.map((_, i) => ({
+      queryKey: ['/api/events', event.id, 'meal-config', i] as const,
+      queryFn: (): Promise<MealConfig> => apiRequest('GET', `/api/events/${event.id}/meal-config?meal=${i}`),
+    })),
+  });
 
-  const allMealTables: Table[][] = mealTableQueries.map(q => q.data ?? []);
-  const allMealConfigs: (MealConfig | undefined)[] = mealConfigQueries.map(q => q.data);
+  const allMealTables: Table[][] = mealTableResults.map(q => (q.data as Table[] | undefined) ?? []);
+  const allMealConfigs: (MealConfig | undefined)[] = mealConfigResults.map(q => q.data as MealConfig | undefined);
 
   const exportCSV = () => {
     const rows: string[] = ['Meal Function,Table Number,Table Shape,Seat Position,Name,Role,Company'];

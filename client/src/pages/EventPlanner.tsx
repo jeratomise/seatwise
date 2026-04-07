@@ -158,6 +158,7 @@ export default function EventPlanner() {
             <TabsContent value="attendees" className="flex-1 overflow-hidden flex flex-col mt-2">
               <AttendeePanel
                 eventId={eventId}
+                event={event}
                 attendees={attendees}
                 tables={tables}
                 assignments={assignmentsForMeal}
