@@ -10,7 +10,11 @@ import {
 } from '@shared/schema';
 
 // On Render, use the mounted persistent disk at /data. Locally use the project root.
+import fs from 'fs';
 const DB_PATH = process.env.NODE_ENV === 'production' ? '/data/seating.db' : 'seating.db';
+// Ensure the directory exists before opening the database
+const DB_DIR = require('path').dirname(DB_PATH);
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 const sqlite = new Database(DB_PATH);
 const db = drizzle(sqlite);
 
