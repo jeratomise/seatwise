@@ -118,6 +118,13 @@
   z-index: 10;
 }
 
+/* Highlighted when another seat is being dragged over it */
+.seat-drop-target {
+  transform: scale(1.25) !important;
+  box-shadow: 0 0 0 3px #3b82f6, 0 2px 10px rgba(59,130,246,0.4) !important;
+  z-index: 10;
+}
+
 .seat-empty {
   background: #e2e8f0;
   border: 2px dashed #94a3b8;

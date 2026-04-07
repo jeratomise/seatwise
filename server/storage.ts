@@ -109,6 +109,7 @@ export interface IStorage {
   // Seat Assignments
   getSeatAssignments(eventId: number, mealFunctionIndex: number): SeatAssignment[];
   getAllSeatAssignments(eventId: number): SeatAssignment[];
+  updateSeatAssignment(id: number, data: Partial<InsertSeatAssignment>): SeatAssignment | undefined;
   deleteSeatAssignment(id: number): void;
   deleteSeatAssignmentsForMeal(eventId: number, mealFunctionIndex: number): void;
   bulkSetSeatAssignments(eventId: number, mealFunctionIndex: number, assignments: InsertSeatAssignment[]): SeatAssignment[];
@@ -210,6 +211,9 @@ export const storage: IStorage = {
   },
   getAllSeatAssignments(eventId) {
     return db.select().from(seatAssignments).where(eq(seatAssignments.eventId, eventId)).all();
+  },
+  updateSeatAssignment(id, data) {
+    return db.update(seatAssignments).set(data).where(eq(seatAssignments.id, id)).returning().get();
   },
   deleteSeatAssignment(id) {
     db.delete(seatAssignments).where(eq(seatAssignments.id, id)).run();
