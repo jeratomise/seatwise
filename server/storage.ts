@@ -79,7 +79,19 @@ try {
   sqlite.exec(`ALTER TABLE tables ADD COLUMN meal_function_index INTEGER NOT NULL DEFAULT 0`);
 } catch {}
 
+// Settings table (key-value, used for password hash etc.)
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+`);
+
 export interface IStorage {
+  // Settings (key-value store)
+  getSetting(key: string): string | undefined;
+  setSetting(key: string, value: string | null): void;
+
   // Events
   getEvents(): Event[];
   getEvent(id: number): Event | undefined;
@@ -116,6 +128,19 @@ export interface IStorage {
 }
 
 export const storage: IStorage = {
+  // ── Settings ──────────────────────────────────────────────────────────────
+  getSetting(key) {
+    const row = sqlite.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  },
+  setSetting(key, value) {
+    if (value === null) {
+      sqlite.prepare('DELETE FROM settings WHERE key = ?').run(key);
+    } else {
+      sqlite.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+    }
+  },
+
   // ── Events ────────────────────────────────────────────────────────────────
   getEvents() {
     return db.select().from(events).all();
