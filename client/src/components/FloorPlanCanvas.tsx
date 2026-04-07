@@ -2,11 +2,11 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { queryClient, apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
-import type { Event, Attendee, Table, SeatAssignment } from '@shared/schema';
+import type { MealConfig, Attendee, Table, SeatAssignment } from '@shared/schema';
 import SeatDialog from './SeatDialog';
 
 interface Props {
-  event: Event;
+  mealConfig: MealConfig | undefined;
   tables: Table[];
   attendees: Attendee[];
   assignments: SeatAssignment[];
@@ -81,32 +81,42 @@ function initials(name: string) {
   return name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
 }
 
-export default function FloorPlanCanvas({ event, tables, attendees, assignments, activeMeal, eventId }: Props) {
+const DEFAULT_STAGE: StagePos = { x: 300, y: 40, w: 200, h: 65 };
+
+export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignments, activeMeal, eventId }: Props) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   const [drag, setDrag] = useState<DragState | null>(null);
   const [tablePositions, setTablePositions] = useState<Record<number, { x: number; y: number }>>({});
   const [stagePos, setStagePos] = useState<StagePos>(() => {
-    try { return JSON.parse(event.stagePosition); } catch { return { x: 300, y: 40, w: 220, h: 70 }; }
+    try { return JSON.parse(mealConfig?.stagePosition ?? 'null') ?? DEFAULT_STAGE; } catch { return DEFAULT_STAGE; }
   });
   const [selectedSeat, setSelectedSeat] = useState<{ tableId: number; seatPos: number } | null>(null);
-  const [bgImage, setBgImage] = useState<string | null>(event.floorPlanImage || null);
+  const [bgImage, setBgImage] = useState<string | null>(mealConfig?.floorPlanImage ?? null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Sync stagePos from event
+  // Sync stagePos and bgImage from mealConfig when it loads or meal changes
   useEffect(() => {
-    try { setStagePos(JSON.parse(event.stagePosition)); } catch {}
-  }, [event.stagePosition]);
+    if (mealConfig) {
+      try { setStagePos(JSON.parse(mealConfig.stagePosition) ?? DEFAULT_STAGE); } catch {}
+      setBgImage(mealConfig.floorPlanImage ?? null);
+    } else {
+      setStagePos(DEFAULT_STAGE);
+      setBgImage(null);
+    }
+    // Reset table drag overrides when switching meals
+    setTablePositions({});
+  }, [mealConfig?.id, activeMeal]);
 
   const updateTableMutation = useMutation({
     mutationFn: ({ id, x, y }: { id: number; x: number; y: number }) =>
       apiRequest('PATCH', `/api/tables/${id}`, { x, y }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] }),
   });
 
-  const updateEventMutation = useMutation({
-    mutationFn: (data: any) => apiRequest('PATCH', `/api/events/${eventId}`, data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId] }),
+  const updateMealConfigMutation = useMutation({
+    mutationFn: (data: any) => apiRequest('PATCH', `/api/events/${eventId}/meal-config?meal=${activeMeal}`, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'meal-config', activeMeal] }),
   });
 
   const getCanvasOffset = useCallback(() => {
@@ -142,7 +152,7 @@ export default function FloorPlanCanvas({ event, tables, attendees, assignments,
       updateTableMutation.mutate({ id: drag.id as number, x: pos.x, y: pos.y });
       setTablePositions(prev => { const n = { ...prev }; delete n[drag.id as number]; return n; });
     } else if (drag.type === 'stage') {
-      updateEventMutation.mutate({ stagePosition: JSON.stringify(stagePos) });
+      updateMealConfigMutation.mutate({ stagePosition: JSON.stringify(stagePos) });
     }
     setDrag(null);
   }, [drag, tablePositions, stagePos]);
@@ -154,14 +164,14 @@ export default function FloorPlanCanvas({ event, tables, attendees, assignments,
     reader.onload = ev => {
       const dataUrl = ev.target?.result as string;
       setBgImage(dataUrl);
-      updateEventMutation.mutate({ floorPlanImage: dataUrl });
+      updateMealConfigMutation.mutate({ floorPlanImage: dataUrl });
     };
     reader.readAsDataURL(file);
   };
 
   const clearBg = () => {
     setBgImage(null);
-    updateEventMutation.mutate({ floorPlanImage: null });
+    updateMealConfigMutation.mutate({ floorPlanImage: null });
   };
 
   // Build assignment lookup
@@ -173,7 +183,9 @@ export default function FloorPlanCanvas({ event, tables, attendees, assignments,
   const attendeeMap = new Map<number, Attendee>();
   for (const a of attendees) attendeeMap.set(a.id, a);
 
-  const isCircular = event.tableType === 'circular';
+  const tableType = mealConfig?.tableType ?? 'circular';
+  const seatsPerTable = mealConfig?.seatsPerTable ?? 10;
+  const isCircular = tableType === 'circular';
   const TABLE_RADIUS = isCircular ? 45 : 0;
   const TABLE_SIZE = 70; // for square
   const SEAT_RADIUS = isCircular ? TABLE_RADIUS + 26 : 0;
@@ -233,10 +245,9 @@ export default function FloorPlanCanvas({ event, tables, attendees, assignments,
           const tx = posOverride?.x ?? table.x;
           const ty = posOverride?.y ?? table.y;
 
-          const seatCount = event.seatsPerTable;
           const seatPositions = isCircular
-            ? getSeatPositions(cx, cy, SEAT_RADIUS, seatCount, table.shape as 'full' | 'half')
-            : getSquareSeatPositions(cx, cy, TABLE_SIZE, seatCount, table.shape as 'full' | 'half');
+            ? getSeatPositions(cx, cy, SEAT_RADIUS, seatsPerTable, table.shape as 'full' | 'half')
+            : getSquareSeatPositions(cx, cy, TABLE_SIZE, seatsPerTable, table.shape as 'full' | 'half');
 
           const tableW = isCircular ? (TABLE_RADIUS + SEAT_RADIUS + 30) * 2 : TABLE_SIZE + 60;
           const tableH = isCircular ? (TABLE_RADIUS + SEAT_RADIUS + 30) * 2 : TABLE_SIZE + 60;

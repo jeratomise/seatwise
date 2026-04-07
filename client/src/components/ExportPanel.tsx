@@ -1,12 +1,14 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import type { Event, Attendee, Table, SeatAssignment } from '@shared/schema';
+import type { Event, Attendee, Table, SeatAssignment, MealConfig } from '@shared/schema';
 import { Download, FileText, Presentation } from 'lucide-react';
 
 interface Props {
   event: Event;
-  tables: Table[];
+  tables: Table[];         // tables for the currently-active meal (used for summary stats)
   attendees: Attendee[];
   allAssignments: SeatAssignment[];
   mealFunctionNames: string[];
@@ -32,9 +34,8 @@ function getSquareSeatPositions(cx: number, cy: number, size: number, count: num
   const positions: { x: number; y: number }[] = [];
   const half = size / 2;
   if (shape === 'half') {
-    const perSide = count;
-    for (let i = 0; i < perSide; i++) {
-      positions.push({ x: cx - half + (i + 0.5) * (size / perSide), y: cy - half - 14 });
+    for (let i = 0; i < count; i++) {
+      positions.push({ x: cx - half + (i + 0.5) * (size / count), y: cy - half - 14 });
     }
     return positions;
   }
@@ -62,14 +63,37 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
   const attendeeMap = new Map<number, Attendee>();
   for (const a of attendees) attendeeMap.set(a.id, a);
 
+  // Fetch per-meal tables and configs for all meal functions (needed for accurate export)
+  const mealCount = mealFunctionNames.length;
+  const mealTableQueries = Array.from({ length: mealCount }, (_, i) =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useQuery<Table[]>({
+      queryKey: ['/api/events', event.id, 'tables', i],
+      queryFn: () => apiRequest('GET', `/api/events/${event.id}/tables?meal=${i}`),
+    })
+  );
+  const mealConfigQueries = Array.from({ length: mealCount }, (_, i) =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useQuery<MealConfig>({
+      queryKey: ['/api/events', event.id, 'meal-config', i],
+      queryFn: () => apiRequest('GET', `/api/events/${event.id}/meal-config?meal=${i}`),
+    })
+  );
+
+  const allMealTables: Table[][] = mealTableQueries.map(q => q.data ?? []);
+  const allMealConfigs: (MealConfig | undefined)[] = mealConfigQueries.map(q => q.data);
+
   const exportCSV = () => {
     const rows: string[] = ['Meal Function,Table Number,Table Shape,Seat Position,Name,Role,Company'];
     for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
+      const mealTables = allMealTables[mealIdx] ?? [];
+      const mealConfig = allMealConfigs[mealIdx];
+      const spt = mealConfig?.seatsPerTable ?? 10;
       const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
-      for (const table of tables.sort((a, b) => a.tableNumber - b.tableNumber)) {
+      for (const table of [...mealTables].sort((a, b) => a.tableNumber - b.tableNumber)) {
         const tableAssignments = mealAssignments.filter(a => a.tableId === table.id)
           .sort((a, b) => a.seatPosition - b.seatPosition);
-        for (let seat = 0; seat < event.seatsPerTable; seat++) {
+        for (let seat = 0; seat < spt; seat++) {
           const a = tableAssignments.find(x => x.seatPosition === seat);
           const person = a ? attendeeMap.get(a.attendeeId) : null;
           rows.push([
@@ -97,32 +121,41 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
   const exportPPTX = async () => {
     setExporting(true);
     try {
-      // Dynamically import pptxgenjs
       const PptxGenJS = (await import('pptxgenjs')).default;
       const pptx = new PptxGenJS();
       pptx.layout = 'LAYOUT_WIDE'; // 13.33" x 7.5"
 
       const SLIDE_W = 13.33;
       const SLIDE_H = 7.5;
-
-      // Color map
       const roleColors: Record<string, string> = { host: '9333ea', floater: 'ea8033', invitee: '3b82f6' };
 
-      const stagePos = JSON.parse(event.stagePosition);
       const canvasW = 800;
       const canvasH = 600;
       const scaleX = (SLIDE_W - 1) / canvasW;
       const scaleY = (SLIDE_H - 1) / canvasH;
 
       for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
+        const mealTables = allMealTables[mealIdx] ?? [];
+        const mealConfig = allMealConfigs[mealIdx];
+        const spt = mealConfig?.seatsPerTable ?? 10;
+        const isCircular = (mealConfig?.tableType ?? 'circular') === 'circular';
+        const TABLE_RADIUS = isCircular ? 45 : 0;
+        const TABLE_SIZE = 70;
+        const SEAT_RADIUS = isCircular ? TABLE_RADIUS + 26 : 0;
+
+        const stagePos = (() => {
+          try { return JSON.parse(mealConfig?.stagePosition ?? 'null') ?? { x: 300, y: 40, w: 200, h: 65 }; }
+          catch { return { x: 300, y: 40, w: 200, h: 65 }; }
+        })();
+
+        const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
+
+        // ── Floor plan slide ──
         const slide = pptx.addSlide();
         slide.background = { color: 'F0F4FF' };
-
-        // Title
         slide.addText(`${event.name} — ${mealName}`, {
           x: 0.3, y: 0.1, w: SLIDE_W - 0.6, h: 0.45,
-          fontSize: 20, bold: true, color: '1e293b',
-          fontFace: 'Calibri',
+          fontSize: 20, bold: true, color: '1e293b', fontFace: 'Calibri',
         });
 
         // Stage
@@ -140,14 +173,7 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
           align: 'center', valign: 'middle', fontFace: 'Calibri',
         });
 
-        const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
-
-        for (const table of tables) {
-          const isCircular = event.tableType === 'circular';
-          const TABLE_RADIUS = isCircular ? 45 : 0;
-          const TABLE_SIZE = 70;
-          const SEAT_RADIUS = isCircular ? TABLE_RADIUS + 26 : 0;
-
+        for (const table of mealTables) {
           const tx = table.x;
           const ty = table.y;
           const cx = tx + (isCircular ? TABLE_RADIUS + 30 : TABLE_SIZE / 2 + 20);
@@ -158,7 +184,6 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
           const tableR = TABLE_RADIUS * scaleX;
           const tableRY = TABLE_RADIUS * scaleY;
 
-          // Draw table
           if (isCircular) {
             if (table.shape === 'full') {
               slide.addShape(pptx.ShapeType.ellipse, {
@@ -166,7 +191,6 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
                 fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
               });
             } else {
-              // Half arc shape — use an ellipse for simplicity
               slide.addShape(pptx.ShapeType.ellipse, {
                 x: slideX - tableR, y: slideY - tableRY, w: tableR * 2, h: tableRY,
                 fill: { color: 'DBEAFE' }, line: { color: '93C5FD', width: 1 },
@@ -181,17 +205,14 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             });
           }
 
-          // Table number
           slide.addText(`${table.tableNumber}`, {
             x: slideX - 0.12, y: slideY - 0.1, w: 0.24, h: 0.2,
-            fontSize: 8, bold: true, color: '1e40af', align: 'center',
-            fontFace: 'Calibri',
+            fontSize: 8, bold: true, color: '1e40af', align: 'center', fontFace: 'Calibri',
           });
 
-          // Seats
           const seatPositions = isCircular
-            ? getSeatPositionsCircular(cx, cy, SEAT_RADIUS, event.seatsPerTable, table.shape as 'full' | 'half')
-            : getSquareSeatPositions(cx, cy, TABLE_SIZE, event.seatsPerTable, table.shape as 'full' | 'half');
+            ? getSeatPositionsCircular(cx, cy, SEAT_RADIUS, spt, table.shape as 'full' | 'half')
+            : getSquareSeatPositions(cx, cy, TABLE_SIZE, spt, table.shape as 'full' | 'half');
 
           for (let i = 0; i < seatPositions.length; i++) {
             const pos = seatPositions[i];
@@ -208,8 +229,8 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             });
 
             if (person) {
-              const initials = person.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
-              slide.addText(initials, {
+              const inits = person.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
+              slide.addText(inits, {
                 x: seatX - seatR, y: seatY - seatR, w: seatR * 2, h: seatR * 2,
                 fontSize: 5, bold: true, color: 'FFFFFF', align: 'center', valign: 'middle',
                 fontFace: 'Calibri',
@@ -219,14 +240,13 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
         }
 
         // Legend
-        const legendItems = [
+        let lx = 0.5;
+        for (const item of [
           { label: 'Host', color: '9333ea' },
           { label: 'Floater', color: 'ea8033' },
           { label: 'Invitee', color: '3b82f6' },
           { label: 'Empty', color: 'CBD5E1' },
-        ];
-        let lx = 0.5;
-        for (const item of legendItems) {
+        ]) {
           slide.addShape(pptx.ShapeType.ellipse, {
             x: lx, y: SLIDE_H - 0.45, w: 0.12, h: 0.12,
             fill: { color: item.color }, line: { color: 'FFFFFF', width: 1 },
@@ -239,8 +259,11 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
         }
       }
 
-      // One slide per table summary
+      // ── Seating list summary slides (one per meal) ──
       for (const [mealIdx, mealName] of mealFunctionNames.entries()) {
+        const mealTables = allMealTables[mealIdx] ?? [];
+        const mealConfig = allMealConfigs[mealIdx];
+        const spt = mealConfig?.seatsPerTable ?? 10;
         const mealAssignments = allAssignments.filter(a => a.mealFunctionIndex === mealIdx);
 
         const slide = pptx.addSlide();
@@ -255,13 +278,12 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
         const startY = 0.7;
         const rowH = 0.18;
 
-        for (const [ti, table] of tables.sort((a, b) => a.tableNumber - b.tableNumber).entries()) {
+        for (const [ti, table] of [...mealTables].sort((a, b) => a.tableNumber - b.tableNumber).entries()) {
           const col = ti % COLS;
           const row = Math.floor(ti / COLS);
           const bx = 0.4 + col * colW;
-          let by = startY + row * (rowH * (event.seatsPerTable + 2));
+          let by = startY + row * (rowH * (spt + 2));
 
-          // Table header
           slide.addShape(pptx.ShapeType.rect, {
             x: bx, y: by, w: colW - 0.1, h: rowH,
             fill: { color: '1e40af' }, line: { color: '1e40af', width: 0 },
@@ -275,12 +297,11 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
           const tableAssignments = mealAssignments.filter(a => a.tableId === table.id)
             .sort((a, b) => a.seatPosition - b.seatPosition);
 
-          for (let s = 0; s < event.seatsPerTable; s++) {
+          const roleColorMap: Record<string, string> = { host: '9333ea', floater: 'ea8033', invitee: '3b82f6' };
+          for (let s = 0; s < spt; s++) {
             const a = tableAssignments.find(x => x.seatPosition === s);
             const person = a ? attendeeMap.get(a.attendeeId) : null;
-            const roleC = person ? (roleColors[person.role] ?? '3b82f6') : 'E2E8F0';
-            const roleColors2: Record<string, string> = { host: '9333ea', floater: 'ea8033', invitee: '3b82f6' };
-            const dotColor = person ? (roleColors2[person.role] ?? '3b82f6') : 'CBD5E1';
+            const dotColor = person ? (roleColorMap[person.role] ?? '3b82f6') : 'CBD5E1';
 
             slide.addShape(pptx.ShapeType.rect, {
               x: bx, y: by, w: colW - 0.1, h: rowH,
@@ -290,14 +311,11 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
               x: bx + 0.03, y: by + 0.025, w: 0.09, h: 0.09,
               fill: { color: dotColor }, line: { color: 'FFFFFF', width: 0.5 },
             });
-            slide.addText(
-              `S${s + 1} ${person ? person.name : '—'}`,
-              {
-                x: bx + 0.14, y: by, w: colW - 0.25, h: rowH,
-                fontSize: 6, color: person ? '1e293b' : '94a3b8',
-                fontFace: 'Calibri', valign: 'middle',
-              }
-            );
+            slide.addText(`S${s + 1} ${person ? person.name : '—'}`, {
+              x: bx + 0.14, y: by, w: colW - 0.25, h: rowH,
+              fontSize: 6, color: person ? '1e293b' : '94a3b8',
+              fontFace: 'Calibri', valign: 'middle',
+            });
             by += rowH;
           }
         }
@@ -313,8 +331,8 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
     }
   };
 
-  // Compute summary stats
-  const totalSeats = tables.length * event.seatsPerTable;
+  // Summary stats for active meal (meal 0 by default in this panel)
+  const totalSeats = tables.length * (allMealConfigs[0]?.seatsPerTable ?? 10);
   const assigned0 = allAssignments.filter(a => a.mealFunctionIndex === 0).length;
 
   return (
@@ -344,7 +362,7 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             <FileText className="w-4 h-4" />
             <div className="text-left">
               <div className="font-medium">Export as CSV</div>
-              <div className="text-[10px] text-muted-foreground">Table list with seat assignments</div>
+              <div className="text-[10px] text-muted-foreground">All meal functions, table + seat assignments</div>
             </div>
           </Button>
 
@@ -353,7 +371,7 @@ export default function ExportPanel({ event, tables, attendees, allAssignments, 
             <Presentation className="w-4 h-4" />
             <div className="text-left">
               <div className="font-medium">{exporting ? 'Generating...' : 'Export as PPTX'}</div>
-              <div className="text-[10px] text-muted-foreground">Floor plan + seating list slides</div>
+              <div className="text-[10px] text-muted-foreground">One floor plan + seating list per meal function</div>
             </div>
           </Button>
         </div>

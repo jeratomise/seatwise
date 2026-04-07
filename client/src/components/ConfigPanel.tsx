@@ -6,38 +6,65 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import type { Event } from '@shared/schema';
+import type { Event, MealConfig } from '@shared/schema';
 import { Plus, Trash2, Save } from 'lucide-react';
 
-interface Props { event: Event; eventId: number; }
+interface Props {
+  event: Event;
+  eventId: number;
+  activeMeal: number;
+  mealConfig: MealConfig | undefined;
+}
 
-export default function ConfigPanel({ event, eventId }: Props) {
+export default function ConfigPanel({ event, eventId, activeMeal, mealConfig }: Props) {
   const { toast } = useToast();
 
-  const [tableType, setTableType] = useState(event.tableType);
-  const [seatsPerTable, setSeatsPerTable] = useState(event.seatsPerTable);
+  // Per-meal settings — reset when switching meals or when config loads
+  const [tableType, setTableType] = useState(mealConfig?.tableType ?? 'circular');
+  const [seatsPerTable, setSeatsPerTable] = useState(mealConfig?.seatsPerTable ?? 10);
+
+  // Global event settings — meal function names
   const [mealNames, setMealNames] = useState<string[]>(() => {
     try { return JSON.parse(event.mealFunctionNames); } catch { return ['Meal Function 1']; }
   });
 
+  // Sync per-meal fields when activeMeal or mealConfig changes
   useEffect(() => {
-    setTableType(event.tableType);
-    setSeatsPerTable(event.seatsPerTable);
-    try { setMealNames(JSON.parse(event.mealFunctionNames)); } catch {}
-  }, [event]);
+    setTableType(mealConfig?.tableType ?? 'circular');
+    setSeatsPerTable(mealConfig?.seatsPerTable ?? 10);
+  }, [activeMeal, mealConfig?.id, mealConfig?.tableType, mealConfig?.seatsPerTable]);
 
-  const updateMutation = useMutation({
+  // Sync meal names when event changes
+  useEffect(() => {
+    try { setMealNames(JSON.parse(event.mealFunctionNames)); } catch {}
+  }, [event.mealFunctionNames]);
+
+  // Save per-meal config (tableType, seatsPerTable) → meal_configs table
+  const saveMealConfigMutation = useMutation({
+    mutationFn: (data: any) =>
+      apiRequest('PATCH', `/api/events/${eventId}/meal-config?meal=${activeMeal}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'meal-config', activeMeal] });
+      toast({ title: `Meal ${activeMeal + 1} settings saved` });
+    },
+  });
+
+  // Save global event config (meal function names/count) → events table
+  const saveEventMutation = useMutation({
     mutationFn: (data: any) => apiRequest('PATCH', `/api/events/${eventId}`, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/events', eventId] });
-      toast({ title: 'Settings saved' });
     },
   });
 
   const save = () => {
-    updateMutation.mutate({
+    // Save per-meal settings
+    saveMealConfigMutation.mutate({
       tableType,
       seatsPerTable: Number(seatsPerTable),
+    });
+    // Save global meal names to event
+    saveEventMutation.mutate({
       mealFunctionCount: mealNames.length,
       mealFunctionNames: JSON.stringify(mealNames),
     });
@@ -45,12 +72,25 @@ export default function ConfigPanel({ event, eventId }: Props) {
 
   const addMeal = () => setMealNames(prev => [...prev, `Meal Function ${prev.length + 1}`]);
   const removeMeal = (i: number) => setMealNames(prev => prev.filter((_, idx) => idx !== i));
-  const updateMealName = (i: number, val: string) => setMealNames(prev => prev.map((n, idx) => idx === i ? val : n));
+  const updateMealName = (i: number, val: string) =>
+    setMealNames(prev => prev.map((n, idx) => idx === i ? val : n));
+
+  const mealFunctionNames: string[] = (() => {
+    try { return JSON.parse(event.mealFunctionNames); } catch { return ['Meal Function 1']; }
+  })();
+  const currentMealName = mealFunctionNames[activeMeal] ?? `Meal Function ${activeMeal + 1}`;
 
   return (
     <div className="space-y-5">
+
+      {/* Per-meal settings section */}
       <div>
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Table Settings</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+          Table Settings
+        </h3>
+        <p className="text-[10px] text-primary mb-3 bg-primary/5 px-2 py-1 rounded">
+          Applies to: <span className="font-semibold">{currentMealName}</span> only
+        </p>
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label className="text-xs">Table Shape</Label>
@@ -81,16 +121,24 @@ export default function ConfigPanel({ event, eventId }: Props) {
         </div>
       </div>
 
+      {/* Global: meal function names */}
       <div>
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Meal Functions</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+          Meal Functions
+        </h3>
+        <p className="text-[10px] text-muted-foreground mb-2">
+          Each meal function has its own floor layout, tables, and seat configuration.
+        </p>
         <div className="space-y-2 mb-2">
           {mealNames.map((name, i) => (
             <div key={i} className="flex items-center gap-1.5">
-              <span className="text-xs text-muted-foreground w-4">{i + 1}.</span>
+              <span className={`text-xs w-4 font-semibold ${i === activeMeal ? 'text-primary' : 'text-muted-foreground'}`}>
+                {i + 1}.
+              </span>
               <Input
                 value={name}
                 onChange={e => updateMealName(i, e.target.value)}
-                className="h-7 text-xs flex-1"
+                className={`h-7 text-xs flex-1 ${i === activeMeal ? 'border-primary/40' : ''}`}
                 placeholder={`Function ${i + 1}`}
                 data-testid={`input-meal-name-${i}`}
               />
@@ -110,10 +158,14 @@ export default function ConfigPanel({ event, eventId }: Props) {
       </div>
 
       <div className="pt-2 border-t">
-        <Button className="w-full h-8 text-xs" onClick={save} disabled={updateMutation.isPending}
-          data-testid="button-save-config">
+        <Button
+          className="w-full h-8 text-xs"
+          onClick={save}
+          disabled={saveMealConfigMutation.isPending || saveEventMutation.isPending}
+          data-testid="button-save-config"
+        >
           <Save className="w-3.5 h-3.5 mr-1.5" />
-          {updateMutation.isPending ? 'Saving...' : 'Save Settings'}
+          {saveMealConfigMutation.isPending || saveEventMutation.isPending ? 'Saving...' : 'Save Settings'}
         </Button>
       </div>
     </div>

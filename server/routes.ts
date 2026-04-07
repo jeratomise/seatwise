@@ -33,6 +33,35 @@ export function registerRoutes(httpServer: Server, app: Express) {
     res.json({ ok: true });
   });
 
+  // ---- MEAL CONFIGS ----
+  // GET /api/events/:eventId/meal-config?meal=0
+  app.get('/api/events/:eventId/meal-config', (req, res) => {
+    const eventId = Number(req.params.eventId);
+    const mealIndex = Number(req.query.meal ?? 0);
+    const config = storage.getMealConfig(eventId, mealIndex);
+    if (!config) {
+      // Return defaults if not yet created
+      return res.json({
+        id: null,
+        eventId,
+        mealFunctionIndex: mealIndex,
+        tableType: 'circular',
+        seatsPerTable: 10,
+        floorPlanImage: null,
+        stagePosition: '{"x":300,"y":40,"w":200,"h":65}',
+      });
+    }
+    res.json(config);
+  });
+
+  // PATCH /api/events/:eventId/meal-config?meal=0
+  app.patch('/api/events/:eventId/meal-config', (req, res) => {
+    const eventId = Number(req.params.eventId);
+    const mealIndex = Number(req.query.meal ?? 0);
+    const config = storage.upsertMealConfig(eventId, mealIndex, req.body);
+    res.json(config);
+  });
+
   // ---- ATTENDEES ----
   app.get('/api/events/:eventId/attendees', (req, res) => {
     res.json(storage.getAttendees(Number(req.params.eventId)));
@@ -68,13 +97,21 @@ export function registerRoutes(httpServer: Server, app: Express) {
     res.json({ ok: true });
   });
 
-  // ---- TABLES ----
+  // ---- TABLES (scoped to meal function) ----
+  // GET /api/events/:eventId/tables?meal=0
   app.get('/api/events/:eventId/tables', (req, res) => {
-    res.json(storage.getTables(Number(req.params.eventId)));
+    const mealIndex = Number(req.query.meal ?? 0);
+    res.json(storage.getTables(Number(req.params.eventId), mealIndex));
   });
 
+  // POST /api/events/:eventId/tables?meal=0
   app.post('/api/events/:eventId/tables', (req, res) => {
-    const parsed = insertTableSchema.safeParse({ ...req.body, eventId: Number(req.params.eventId) });
+    const mealIndex = Number(req.query.meal ?? req.body.mealFunctionIndex ?? 0);
+    const parsed = insertTableSchema.safeParse({
+      ...req.body,
+      eventId: Number(req.params.eventId),
+      mealFunctionIndex: mealIndex,
+    });
     if (!parsed.success) return res.status(400).json({ error: parsed.error });
     res.json(storage.createTable(parsed.data));
   });
@@ -90,8 +127,10 @@ export function registerRoutes(httpServer: Server, app: Express) {
     res.json({ ok: true });
   });
 
+  // DELETE /api/events/:eventId/tables?meal=0
   app.delete('/api/events/:eventId/tables', (req, res) => {
-    storage.deleteAllTables(Number(req.params.eventId));
+    const mealIndex = Number(req.query.meal ?? 0);
+    storage.deleteAllTables(Number(req.params.eventId), mealIndex);
     res.json({ ok: true });
   });
 

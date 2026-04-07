@@ -1,11 +1,11 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { queryClient, apiRequest } from '@/lib/queryClient';
 import { useParams, useLocation } from 'wouter';
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import type { Event, Attendee, Table, SeatAssignment } from '@shared/schema';
+import type { Event, Attendee, Table, SeatAssignment, MealConfig } from '@shared/schema';
 import ConfigPanel from '@/components/ConfigPanel';
 import FloorPlanCanvas from '@/components/FloorPlanCanvas';
 import AttendeePanel from '@/components/AttendeePanel';
@@ -30,12 +30,27 @@ export default function EventPlanner() {
     enabled: !!eventId,
   });
 
+  // Tables are scoped to the active meal function
   const { data: tables = [] } = useQuery<Table[]>({
-    queryKey: ['/api/events', eventId, 'tables'],
-    queryFn: () => apiRequest('GET', `/api/events/${eventId}/tables`),
+    queryKey: ['/api/events', eventId, 'tables', activeMeal],
+    queryFn: () => apiRequest('GET', `/api/events/${eventId}/tables?meal=${activeMeal}`),
     enabled: !!eventId,
   });
 
+  // Meal config for the active meal function
+  const { data: mealConfig } = useQuery<MealConfig>({
+    queryKey: ['/api/events', eventId, 'meal-config', activeMeal],
+    queryFn: () => apiRequest('GET', `/api/events/${eventId}/meal-config?meal=${activeMeal}`),
+    enabled: !!eventId,
+  });
+
+  const { data: assignmentsForMeal = [] } = useQuery<SeatAssignment[]>({
+    queryKey: ['/api/events', eventId, 'assignments', activeMeal],
+    queryFn: () => apiRequest('GET', `/api/events/${eventId}/assignments?meal=${activeMeal}`),
+    enabled: !!eventId,
+  });
+
+  // All assignments still needed for export
   const { data: allAssignments = [] } = useQuery<SeatAssignment[]>({
     queryKey: ['/api/events', eventId, 'assignments'],
     queryFn: () => apiRequest('GET', `/api/events/${eventId}/assignments`),
@@ -46,7 +61,10 @@ export default function EventPlanner() {
     ? JSON.parse(event.mealFunctionNames)
     : ['Meal Function 1'];
 
-  const assignmentsForMeal = allAssignments.filter(a => a.mealFunctionIndex === activeMeal);
+  // When switching meal tabs, reset to the new tab
+  const handleMealSwitch = (i: number) => {
+    setActiveMeal(i);
+  };
 
   if (eventLoading) {
     return (
@@ -85,27 +103,25 @@ export default function EventPlanner() {
         <div className="flex-1 min-w-0">
           <h1 className="font-bold text-base leading-tight truncate">{event.name}</h1>
           <p className="text-xs text-muted-foreground">
-            {event.tableType} tables · {event.seatsPerTable} seats · {event.mealFunctionCount} meal function{event.mealFunctionCount !== 1 ? 's' : ''}
+            {mealConfig?.tableType ?? 'circular'} tables · {mealConfig?.seatsPerTable ?? 10} seats · {event.mealFunctionCount} meal function{event.mealFunctionCount !== 1 ? 's' : ''}
           </p>
         </div>
 
         {/* Meal function tabs */}
-        {mealFunctionNames.length > 1 && (
-          <div className="flex gap-1 ml-2">
-            {mealFunctionNames.map((name, i) => (
-              <Button
-                key={i}
-                variant={activeMeal === i ? 'default' : 'outline'}
-                size="sm"
-                className="text-xs h-7"
-                onClick={() => setActiveMeal(i)}
-                data-testid={`button-meal-${i}`}
-              >
-                {name}
-              </Button>
-            ))}
-          </div>
-        )}
+        <div className="flex gap-1 ml-2">
+          {mealFunctionNames.map((name, i) => (
+            <Button
+              key={i}
+              variant={activeMeal === i ? 'default' : 'outline'}
+              size="sm"
+              className="text-xs h-7"
+              onClick={() => handleMealSwitch(i)}
+              data-testid={`button-meal-${i}`}
+            >
+              {name}
+            </Button>
+          ))}
+        </div>
       </header>
 
       {/* Main layout */}
@@ -134,7 +150,6 @@ export default function EventPlanner() {
 
             <TabsContent value="floor" className="flex-1 overflow-y-auto p-2 mt-2">
               <FloorSidePanel
-                event={event}
                 tables={tables}
                 eventId={eventId}
                 activeMeal={activeMeal}
@@ -147,10 +162,16 @@ export default function EventPlanner() {
                 tables={tables}
                 assignments={assignmentsForMeal}
                 activeMeal={activeMeal}
+                mealConfig={mealConfig}
               />
             </TabsContent>
             <TabsContent value="config" className="flex-1 overflow-y-auto p-3 mt-2">
-              <ConfigPanel event={event} eventId={eventId} />
+              <ConfigPanel
+                event={event}
+                eventId={eventId}
+                activeMeal={activeMeal}
+                mealConfig={mealConfig}
+              />
             </TabsContent>
             <TabsContent value="export" className="flex-1 overflow-y-auto p-3 mt-2">
               <ExportPanel
@@ -167,7 +188,7 @@ export default function EventPlanner() {
         {/* Main canvas */}
         <div className="flex-1 overflow-hidden relative">
           <FloorPlanCanvas
-            event={event}
+            mealConfig={mealConfig}
             tables={tables}
             attendees={attendees}
             assignments={assignmentsForMeal}
@@ -180,9 +201,9 @@ export default function EventPlanner() {
   );
 }
 
-// Floor side panel — table management
-function FloorSidePanel({ event, tables, eventId, activeMeal }: {
-  event: Event; tables: Table[]; eventId: number; activeMeal: number;
+// Floor side panel — table management scoped to active meal
+function FloorSidePanel({ tables, eventId, activeMeal }: {
+  tables: Table[]; eventId: number; activeMeal: number;
 }) {
   const { toast } = useToast();
 
@@ -191,27 +212,29 @@ function FloorSidePanel({ event, tables, eventId, activeMeal }: {
       const nextNum = tables.length > 0 ? Math.max(...tables.map(t => t.tableNumber)) + 1 : 1;
       const col = (tables.length % 4);
       const row = Math.floor(tables.length / 4);
-      return apiRequest('POST', `/api/events/${eventId}/tables`, {
+      return apiRequest('POST', `/api/events/${eventId}/tables?meal=${activeMeal}`, {
         tableNumber: nextNum,
         x: 80 + col * 160,
         y: 80 + row * 160,
         shape: 'full',
+        mealFunctionIndex: activeMeal,
       });
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] }),
   });
 
   const deleteTableMutation = useMutation({
     mutationFn: (id: number) => apiRequest('DELETE', `/api/tables/${id}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] });
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments', activeMeal] });
       queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments'] });
     },
   });
 
   const updateTableMutation = useMutation({
     mutationFn: ({ id, data }: { id: number; data: any }) => apiRequest('PATCH', `/api/tables/${id}`, data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] }),
   });
 
   const autoArrangeMutation = useMutation({
@@ -227,7 +250,7 @@ function FloorSidePanel({ event, tables, eventId, activeMeal }: {
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] });
       toast({ title: 'Tables auto-arranged' });
     },
   });
@@ -240,12 +263,13 @@ function FloorSidePanel({ event, tables, eventId, activeMeal }: {
         const idx = tables.length + i;
         const col = idx % 4;
         const row = Math.floor(idx / 4);
-        await apiRequest('POST', `/api/events/${eventId}/tables`, {
+        await apiRequest('POST', `/api/events/${eventId}/tables?meal=${activeMeal}`, {
           tableNumber: num, x: 80 + col * 160, y: 80 + row * 160, shape: 'full',
+          mealFunctionIndex: activeMeal,
         });
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'tables', activeMeal] }),
   });
 
   return (

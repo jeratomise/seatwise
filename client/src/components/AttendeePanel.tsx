@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import type { Attendee, Table, SeatAssignment } from '@shared/schema';
+import type { Attendee, Table, SeatAssignment, MealConfig } from '@shared/schema';
 import { Upload, Plus, Trash2, Shuffle, X, UserCheck } from 'lucide-react';
 import Papa from 'papaparse';
 
@@ -15,6 +15,7 @@ interface Props {
   tables: Table[];
   assignments: SeatAssignment[];
   activeMeal: number;
+  mealConfig?: MealConfig;
 }
 
 function roleColor(role: string) {
@@ -31,7 +32,7 @@ function roleBadge(role: string) {
   return m[role] ?? '';
 }
 
-export default function AttendeePanel({ eventId, attendees, tables, assignments, activeMeal }: Props) {
+export default function AttendeePanel({ eventId, attendees, tables, assignments, activeMeal, mealConfig }: Props) {
   const { toast } = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
   const [newName, setNewName] = useState('');
@@ -76,16 +77,17 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
   const shuffleMutation = useMutation({
     mutationFn: async () => {
       if (tables.length === 0) throw new Error('No tables');
-      const seatsPerTable = tables.length > 0 ? Math.max(...assignments.map(a => a.seatPosition + 1), 1) : 10;
-      const totalSeats = tables.length * 10; // we'll use actual config
 
       const hosts = attendees.filter(a => a.role === 'host');
       const floaters = attendees.filter(a => a.role === 'floater');
       const others = attendees.filter(a => a.role === 'invitee');
 
-      // Get config seats from previous assignments or default 10
-      const eventResp = await apiRequest('GET', `/api/events/${eventId}`);
-      const spt = eventResp.seatsPerTable ?? 10;
+      // Use mealConfig.seatsPerTable if available, otherwise fall back to API
+      let spt = mealConfig?.seatsPerTable;
+      if (!spt) {
+        const mealConfigResp = await apiRequest('GET', `/api/events/${eventId}/meal-config?meal=${activeMeal}`);
+        spt = mealConfigResp.seatsPerTable ?? 10;
+      }
 
       // Build table slots
       const slots: { tableId: number; seat: number }[] = [];
@@ -146,6 +148,7 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
       });
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments', activeMeal] });
       queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments'] });
       toast({ title: 'Seats shuffled', description: 'Hosts stay at table head, floaters distributed evenly.' });
     },
@@ -155,6 +158,7 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
   const clearAllAssignmentsMutation = useMutation({
     mutationFn: () => apiRequest('DELETE', `/api/events/${eventId}/assignments?meal=${activeMeal}`),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments', activeMeal] });
       queryClient.invalidateQueries({ queryKey: ['/api/events', eventId, 'assignments'] });
       toast({ title: 'Assignments cleared' });
     },
