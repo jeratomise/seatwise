@@ -125,7 +125,11 @@ export const storage: IStorage = {
   },
   bulkCreateAttendees(data) {
     if (data.length === 0) return [];
-    return data.map(a => db.insert(attendees).values(a).returning().get());
+    // Wrap in a transaction so all inserts happen atomically and fast
+    const insertMany = sqlite.transaction((rows: typeof data) => {
+      return rows.map(a => db.insert(attendees).values(a).returning().get());
+    });
+    return insertMany(data);
   },
   deleteAllAttendees(eventId) {
     db.delete(attendees).where(eq(attendees.eventId, eventId)).run();

@@ -166,28 +166,57 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      encoding: 'UTF-8',
       complete: (result) => {
-        setCsvData(result.data as any[]);
-        setCsvHeaders(result.meta.fields ?? []);
+        // Strip BOM from header names (﻿ character on first field)
+        const rawFields = result.meta.fields ?? [];
+        const fields = rawFields.map(f => f.replace(/^\uFEFF/, '').trim());
+        // Rebuild data with cleaned keys
+        const cleanData = (result.data as any[]).map(row => {
+          const clean: any = {};
+          rawFields.forEach((raw, i) => { clean[fields[i]] = row[raw]; });
+          return clean;
+        });
+        // Filter out fully-empty rows
+        const filtered = cleanData.filter(row => fields.some(f => (row[f] ?? '').toString().trim() !== ''));
+        setCsvData(filtered);
+        setCsvHeaders(fields);
         setShowImport(true);
         // Auto-detect columns
-        const fields = result.meta.fields ?? [];
-        const nameCol = fields.find(f => /name/i.test(f)) ?? '';
-        const roleCol = fields.find(f => /role|type/i.test(f)) ?? '';
-        const compCol = fields.find(f => /company|org|organization/i.test(f)) ?? '';
+        const nameCol = fields.find(f => /full.?name|^name$/i.test(f)) ?? fields.find(f => /name/i.test(f)) ?? '';
+        const roleCol = fields.find(f => /^type$/i.test(f)) ?? fields.find(f => /role|type/i.test(f)) ?? '';
+        const compCol = fields.find(f => /company|org|country|region/i.test(f)) ?? '';
         setColMap({ name: nameCol, role: roleCol, company: compCol });
       },
     });
+    // Reset input so same file can be re-uploaded
+    e.target.value = '';
   };
+
+  // Maps any role-like string to host | floater | invitee
+  function normalizeRole(raw: string): 'host' | 'floater' | 'invitee' {
+    const v = raw.toLowerCase().trim();
+    if (v === '') return 'invitee';
+    if (v.includes('host')) return 'host';
+    if (v.includes('floater') || v.includes('float')) return 'floater';
+    if (v === 'host' || v === 'table host') return 'host';
+    if (['host', 'floater', 'invitee', 'guest', 'attendee'].includes(v)) {
+      return v === 'host' ? 'host' : v === 'floater' ? 'floater' : 'invitee';
+    }
+    return 'invitee';
+  }
 
   const handleImportConfirm = () => {
     if (!colMap.name) return toast({ title: 'Select a Name column', variant: 'destructive' });
-    const list = csvData.map(row => ({
-      name: row[colMap.name] ?? '',
-      role: colMap.role ? ((['host', 'floater', 'invitee'].includes((row[colMap.role] ?? '').toLowerCase())
-        ? row[colMap.role].toLowerCase() : 'invitee')) : 'invitee',
-      company: colMap.company ? (row[colMap.company] ?? '') : '',
-    })).filter(r => r.name.trim());
+    const list = csvData
+      .map(row => ({
+        name: (row[colMap.name] ?? '').toString().trim(),
+        role: normalizeRole(colMap.role ? (row[colMap.role] ?? '').toString() : ''),
+        company: colMap.company ? (row[colMap.company] ?? '').toString().trim() : '',
+        notes: '',
+      }))
+      .filter(r => r.name.length > 0);
+    if (list.length === 0) return toast({ title: 'No valid rows found', variant: 'destructive' });
     bulkImportMutation.mutate(list);
   };
 
@@ -329,8 +358,9 @@ export default function AttendeePanel({ eventId, attendees, tables, assignments,
               ))}
 
               <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded">
-                <p className="font-medium mb-1">Role mapping:</p>
-                <p>Values in the role column will be matched to: <code>host</code>, <code>floater</code>, <code>invitee</code> (case-insensitive). Other values default to invitee.</p>
+                <p className="font-medium mb-1">Role mapping (auto-detected):</p>
+                <p>Any value containing <code>host</code> → Host &nbsp;·&nbsp; containing <code>floater</code> → Floater &nbsp;·&nbsp; everything else → Invitee</p>
+                <p className="mt-1 text-[10px]">e.g. "Table Host (ANZ)", "Table Host (India)" → Host &nbsp;·&nbsp; "Floater" → Floater</p>
               </div>
 
               {/* Preview */}
