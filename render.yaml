@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: seatwise
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+    disk:
+      name: seatwise-db
+      mountPath: /data
+      sizeGB: 1
