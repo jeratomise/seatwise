@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { queryClient, apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
@@ -119,16 +119,29 @@ export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignm
   // Zoom & pan
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  // Refs so wheel handler (native listener) always reads current values
+  // Refs so native event handlers always read current values
   const zoomRef = useRef(1);
   const panRef = useRef({ x: 0, y: 0 });
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { panRef.current = pan; }, [pan]);
 
-  // Mouse-wheel zoom centred on cursor
+  // Touch state for pan / pinch-zoom
+  interface TouchState {
+    fingers: number;
+    startX: number; startY: number;
+    panStart: { x: number; y: number };
+    pinchStartDist?: number;
+    pinchStartZoom?: number;
+    pinchMidX?: number;
+    pinchMidY?: number;
+  }
+  const touchRef = useRef<TouchState | null>(null);
+
+  // Mouse-wheel zoom + touch pan/pinch — all via native listeners (passive: false)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
@@ -142,8 +155,80 @@ export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignm
       setZoom(newZ);
       setPan({ x: mx - ratio * (mx - p.x), y: my - ratio * (my - p.y) });
     };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchRef.current = {
+          fingers: 1,
+          startX: t.clientX, startY: t.clientY,
+          panStart: { ...panRef.current },
+        };
+      } else if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const midX = (t1.clientX + t2.clientX) / 2;
+        const midY = (t1.clientY + t2.clientY) / 2;
+        touchRef.current = {
+          fingers: 2,
+          startX: midX, startY: midY,
+          panStart: { ...panRef.current },
+          pinchStartDist: dist,
+          pinchStartZoom: zoomRef.current,
+          pinchMidX: midX,
+          pinchMidY: midY,
+        };
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      const state = touchRef.current;
+      if (!state) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+
+      if (e.touches.length === 1 && state.fingers === 1) {
+        const t = e.touches[0];
+        const dx = t.clientX - state.startX;
+        const dy = t.clientY - state.startY;
+        setPan({ x: state.panStart.x + dx, y: state.panStart.y + dy });
+      } else if (e.touches.length === 2 && state.fingers === 2 && state.pinchStartDist) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const scale = dist / state.pinchStartDist;
+        const newZ = Math.max(0.25, Math.min(3, state.pinchStartZoom! * scale));
+
+        // Keep midpoint fixed while zooming
+        const midX = (t1.clientX + t2.clientX) / 2 - rect.left;
+        const midY = (t1.clientY + t2.clientY) / 2 - rect.top;
+        const ratio = newZ / state.pinchStartZoom!;
+        setZoom(newZ);
+        setPan({
+          x: midX - ratio * (midX - state.panStart.x),
+          y: midY - ratio * (midY - state.panStart.y),
+        });
+      }
+    };
+
+    const onTouchEnd = () => {
+      touchRef.current = null;
+    };
+
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd);
+
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', onTouchEnd);
+    };
   }, []);
 
   // Sync stage/bg/positions when meal changes; reset zoom & pan
@@ -340,26 +425,25 @@ export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignm
   return (
     <div className="h-full flex flex-col">
       {/* ── Toolbar ── */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b bg-card text-xs flex-shrink-0">
-        <span className="text-muted-foreground">Floor plan:</span>
-        <button className="text-primary hover:underline" onClick={() => fileRef.current?.click()}>
-          Upload image
+      <div className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 border-b bg-card text-xs flex-shrink-0 flex-wrap">
+        <button className="text-primary hover:underline whitespace-nowrap" onClick={() => fileRef.current?.click()}>
+          Upload bg
         </button>
         {bgImage && <button className="text-destructive hover:underline" onClick={clearBg}>Clear</button>}
         <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleBgUpload} />
 
-        <span className="text-muted-foreground hidden lg:inline ml-2">
+        <span className="text-muted-foreground hidden lg:inline">
           Drag tables · Drag seats to swap · Click seats to assign
         </span>
 
         {/* Zoom controls */}
         <div className="flex items-center gap-0.5 ml-auto">
           <Button
-            size="icon" variant="ghost" className="h-6 w-6"
-            title="Zoom out (scroll down)"
+            size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6"
+            title="Zoom out"
             onClick={() => setZoom(z => Math.max(0.25, z - 0.25))}
           >
-            <ZoomOut className="w-3 h-3" />
+            <ZoomOut className="w-4 h-4 sm:w-3 sm:h-3" />
           </Button>
           <button
             className="text-xs w-11 text-center tabular-nums hover:bg-muted rounded px-1 py-0.5"
@@ -369,23 +453,23 @@ export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignm
             {Math.round(zoom * 100)}%
           </button>
           <Button
-            size="icon" variant="ghost" className="h-6 w-6"
-            title="Zoom in (scroll up)"
+            size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6"
+            title="Zoom in"
             onClick={() => setZoom(z => Math.min(3, z + 0.25))}
           >
-            <ZoomIn className="w-3 h-3" />
+            <ZoomIn className="w-4 h-4 sm:w-3 sm:h-3" />
           </Button>
           <Button
-            size="icon" variant="ghost" className="h-6 w-6"
+            size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6"
             title="Reset view"
             onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
           >
-            <Maximize2 className="w-3 h-3" />
+            <Maximize2 className="w-4 h-4 sm:w-3 sm:h-3" />
           </Button>
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center gap-3 ml-2">
+        {/* Legend — hidden on mobile */}
+        <div className="hidden sm:flex items-center gap-3 ml-1">
           <span className="flex items-center gap-1"><span className="legend-dot" style={{ background: 'var(--host-color)' }} /> Host</span>
           <span className="flex items-center gap-1"><span className="legend-dot" style={{ background: 'var(--floater-color)' }} /> Floater</span>
           <span className="flex items-center gap-1"><span className="legend-dot" style={{ background: 'var(--invitee-color)' }} /> Invitee</span>
@@ -397,7 +481,7 @@ export default function FloorPlanCanvas({ mealConfig, tables, attendees, assignm
       <div
         ref={canvasRef}
         className="floor-canvas flex-1"
-        style={{ cursor: canvasCursor }}
+        style={{ cursor: canvasCursor, touchAction: 'none' }}
         onMouseDown={handleCanvasMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

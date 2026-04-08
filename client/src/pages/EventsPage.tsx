@@ -77,9 +77,9 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
   const isPending = setPasswordMutation.isPending || removePasswordMutation.isPending;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
       <div
-        className="bg-card border rounded-xl shadow-2xl w-[380px] p-6 space-y-4"
+        className="bg-card border rounded-xl shadow-2xl w-full max-w-[380px] p-6 space-y-4"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -238,8 +238,8 @@ export default function EventsPage() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b bg-card">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
-          <svg viewBox="0 0 32 32" width="32" height="32" aria-label="SeatWise logo" fill="none">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3 sm:py-4 flex items-center gap-2 sm:gap-3">
+          <svg viewBox="0 0 32 32" width="28" height="28" aria-label="SeatWise logo" fill="none" className="flex-shrink-0">
             <rect x="2" y="2" width="28" height="28" rx="6" fill="hsl(215,80%,42%)" />
             <circle cx="16" cy="16" r="7" stroke="white" strokeWidth="2" />
             <circle cx="16" cy="9" r="2" fill="white" />
@@ -247,56 +247,56 @@ export default function EventsPage() {
             <circle cx="9" cy="16" r="2" fill="white" />
             <circle cx="23" cy="16" r="2" fill="white" />
           </svg>
-          <div className="flex-1">
-            <h1 className="text-xl font-bold tracking-tight">SeatWise</h1>
-            <p className="text-xs text-muted-foreground">Event Seating Planner</p>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight">SeatWise</h1>
+            <p className="text-xs text-muted-foreground hidden sm:block">Event Seating Planner</p>
           </div>
 
-          {/* Security controls */}
+          {/* Security controls — icon-only on mobile, labelled on sm+ */}
           <div className="flex items-center gap-1">
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 gap-1.5 text-xs"
+              className="h-9 w-9 sm:w-auto sm:px-3 sm:gap-1.5 text-xs"
               onClick={() => setShowPasswordDialog(true)}
               title={authStatus?.hasPassword ? 'Change password' : 'Set a password'}
             >
-              <Lock className="w-3.5 h-3.5" />
-              {authStatus?.hasPassword ? 'Password' : 'Set password'}
+              <Lock className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+              <span className="hidden sm:inline">{authStatus?.hasPassword ? 'Password' : 'Set password'}</span>
             </Button>
             {authStatus?.hasPassword && (
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8 gap-1.5 text-xs text-muted-foreground"
+                className="h-9 w-9 sm:w-auto sm:px-3 sm:gap-1.5 text-xs text-muted-foreground"
                 onClick={handleSignOut}
                 title="Sign out"
               >
-                <LogOut className="w-3.5 h-3.5" />
-                Sign out
+                <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+                <span className="hidden sm:inline">Sign out</span>
               </Button>
             )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-10">
-        <div className="mb-8">
-          <h2 className="text-2xl font-bold mb-1">Your Events</h2>
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
+        <div className="mb-6 sm:mb-8">
+          <h2 className="text-xl sm:text-2xl font-bold mb-1">Your Events</h2>
           <p className="text-muted-foreground text-sm">Create and manage seating arrangements for your events.</p>
         </div>
 
         {/* Create new */}
-        <div className="flex gap-3 mb-8">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 mb-6 sm:mb-8">
           <Input
             data-testid="input-event-name"
             placeholder="Event name (e.g. Annual Gala 2025)"
             value={newName}
             onChange={e => setNewName(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleCreate()}
-            className="max-w-sm"
+            className="sm:max-w-sm"
           />
-          <Button data-testid="button-create-event" onClick={handleCreate} disabled={createMutation.isPending}>
+          <Button data-testid="button-create-event" onClick={handleCreate} disabled={createMutation.isPending} className="h-10">
             <Plus className="w-4 h-4 mr-1.5" />
             New Event
           </Button>
@@ -330,7 +330,7 @@ export default function EventsPage() {
                     data-testid={`button-delete-event-${event.id}`}
                     variant="ghost"
                     size="icon"
-                    className="opacity-0 group-hover:opacity-100 h-7 w-7 text-destructive hover:text-destructive"
+                    className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 h-9 w-9 text-destructive hover:text-destructive"
                     onClick={e => { e.stopPropagation(); deleteMutation.mutate(event.id); }}
                   >
                     <Trash2 className="w-3.5 h-3.5" />

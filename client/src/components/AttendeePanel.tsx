@@ -349,7 +349,7 @@ export default function AttendeePanel({ eventId, event, attendees, tables, assig
               className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-muted group"
               data-testid={`attendee-row-${person.id}`}
             >
-              <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
+              <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
                 style={{ background: roleColor(person.role) }}>
                 {person.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
               </div>
@@ -374,7 +374,7 @@ export default function AttendeePanel({ eventId, event, attendees, tables, assig
                 </div>
               </div>
               <Button variant="ghost" size="icon"
-                className="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive hover:text-destructive flex-shrink-0"
+                className="h-8 w-8 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 text-destructive hover:text-destructive flex-shrink-0"
                 onClick={() => deleteMutation.mutate(person.id)}>
                 <X className="w-3 h-3" />
               </Button>
@@ -385,8 +385,8 @@ export default function AttendeePanel({ eventId, event, attendees, tables, assig
 
       {/* CSV Import modal */}
       {showImport && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-card border rounded-xl shadow-2xl w-[480px] max-h-[80vh] flex flex-col">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="bg-card border rounded-xl shadow-2xl w-full max-w-[480px] max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b">
               <h3 className="font-semibold text-sm">Import from CSV</h3>
               <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setShowImport(false)}>
